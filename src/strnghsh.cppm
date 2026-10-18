@@ -7,9 +7,11 @@ import <atomic>;
 import <cstddef>;
 import <cstdint>;
 import <functional>;
+import <memory>;
 import <mutex>;
 import <optional>;
 import <random>;
+import <span>;
 import <stdexcept>;
 import <string>;
 import <string_view>;
@@ -88,6 +90,56 @@ public:
     }
 };
 
+/// An immutable, owning name table captured by database::snapshot() or
+/// read_mostly_database::snapshot(). Independent of the source database's lifetime
+/// and subsequent insertions. Copies share ownership without copying entries or text.
+/// Views remain valid until this snapshot is destroyed, assigned to, or moved from.
+/// @par Thread safety
+/// After synchronized publication, concurrent lookup() calls need no locks. Lookup uses
+/// only const container operations and does not allocate or access the source database.
+/// Synchronize assignment, moving from, and destruction against all readers and views.
+class database_snapshot
+{
+public:
+    /// Return captured text, or nullopt if the hash was absent when captured.
+    /// Acquires no mutex; returned views borrow this snapshot's immutable strings.
+    [[nodiscard]] std::optional<std::string_view> lookup(hash_type value) const
+    {
+        if (!strings_) {
+            return std::nullopt;
+        }
+
+        const auto entry = strings_->find(value);
+
+        if (entry == strings_->end()) {
+            return std::nullopt;
+        }
+
+        return *entry->second;
+    }
+
+private:
+    friend class database;
+    friend class read_mostly_database;
+    using index = std::unordered_map<hash_type, std::shared_ptr<const std::string>>;
+
+    explicit database_snapshot(std::shared_ptr<const index> strings) : strings_(std::move(strings)) {}
+
+    explicit database_snapshot(const std::unordered_map<hash_type, std::string>& strings)
+    {
+        auto copy = std::make_shared<index>();
+        copy->reserve(strings.size());
+
+        for (const auto& [value, text] : strings) {
+            copy->emplace(value, std::make_shared<const std::string>(text));
+        }
+
+        strings_ = std::move(copy);
+    }
+
+    std::shared_ptr<const index> strings_;
+};
+
 /// Thread-safe storage using std::unordered_map; views survive insertions and rehashes.
 /// Destruction requires that no threads are accessing the database or its views.
 /// @par Thread safety
@@ -120,9 +172,124 @@ public:
         return entry->second;
     }
 
+    /// Copy all current entries under the database mutex for subsequent lookup without locks.
+    /// Takes linear time in the stored entries and text size, allocating independent storage.
+    /// Allocation/copy failures propagate and leave this database unchanged. The snapshot
+    /// may outlive this database; later insertions are visible only in later snapshots.
+    [[nodiscard]] database_snapshot snapshot() const
+    {
+        const std::lock_guard lock(mutex_);
+        return database_snapshot(strings_);
+    }
+
 private:
     mutable std::mutex mutex_;
     std::unordered_map<hash_type, std::string> strings_;
+};
+
+/// Copy-on-write storage for infrequent or batched registration and frequent lookup.
+/// Published indexes and string objects are immutable; updates copy only index entries.
+/// Text views remain valid while this database lives, across all subsequent publications.
+/// Destruction requires that no calls are in flight; captured snapshots may outlive it.
+/// @par Thread safety
+/// Writers serialize with one mutex. lookup() and snapshot() acquire an atomic shared_ptr,
+/// never the writer mutex. Atomic shared_ptr operations may internally lock; this is not
+/// a lock-free guarantee. Retained snapshots perform lookup without synchronization.
+/// Publishing new entries costs O(N + K) expected index work for N existing and K batch
+/// entries, plus copying new text. Releasing the last owner of an old index reclaims it.
+class read_mostly_database final : public basic_database
+{
+public:
+    /// Construct an empty published table. Allocation failures propagate.
+    read_mostly_database() : current_(std::make_shared<const index>()) {}
+
+    /// Register one supplied hash/text pair; duplicates and collisions do not publish.
+    /// The hash must correspond to text. Allocation failures leave the table unchanged.
+    insert_status insert(hash_type value, std::string_view text) override
+    {
+        const std::pair<hash_type, std::string_view> entry{value, text};
+        return insert_batch(std::span(&entry, 1));
+    }
+
+    /// Hash and register a batch, cloning the index at most once and publishing atomically.
+    /// Return new_string if any entry is new, old_string for an empty/duplicate-only batch,
+    /// or collision if any hash conflicts with existing text or earlier batch text.
+    /// Collision or allocation failure publishes nothing, including earlier batch entries.
+    /// Exceptions propagate. Input views must stay valid and unchanged throughout the call.
+    insert_status insert_batch(std::span<const std::string_view> texts)
+    {
+        return insert_batch_impl(texts, [](std::string_view text) {
+            return std::pair{hash(text), text};
+        });
+    }
+
+    /// Register supplied hash/text pairs with the same atomic batch semantics.
+    /// Callers must supply correct hashes; conflicting text rejects the entire batch.
+    /// Neither input pairs nor their text are retained; new text is copied before return.
+    insert_status insert_batch(std::span<const std::pair<hash_type, std::string_view>> entries)
+    {
+        return insert_batch_impl(entries, [](const auto & entry) {
+            return entry;
+        });
+    }
+
+    /// Look up the current published table without acquiring the writer mutex.
+    /// Return nullopt for an unknown hash. Views survive replacement of the current index
+    /// because every later index retains the same immutable string objects.
+    [[nodiscard]] std::optional<std::string_view> lookup(hash_type value) const override
+    {
+        return snapshot().lookup(value);
+    }
+
+    /// Acquire the current owning snapshot without copying entries or text.
+    /// Atomic acquisition may internally lock; subsequent snapshot lookups do not.
+    /// Snapshot acquisition does not allocate. Later batches are visible only to later
+    /// acquisitions. A captured snapshot and its text can outlive this database.
+    [[nodiscard]] database_snapshot snapshot() const
+    {
+        return database_snapshot(current_.load(std::memory_order_acquire));
+    }
+
+private:
+    using index = database_snapshot::index;
+
+    template<class Entries, class GetEntry>
+    insert_status insert_batch_impl(const Entries& entries, GetEntry get_entry)
+    {
+        const std::lock_guard lock(writer_mutex_);
+        const auto previous = current_.load(std::memory_order_relaxed);
+        std::shared_ptr<index> next;
+
+        for (const auto& input : entries) {
+            const auto[value, text] = get_entry(input);
+            const auto& active = next ? *next : *previous;
+            const auto found = active.find(value);
+
+            if (found != active.end()) {
+                if (*found->second != text) {
+                    return insert_status::collision;
+                }
+
+                continue;
+            }
+
+            if (!next) {
+                next = std::make_shared<index>(*previous);
+            }
+
+            next->emplace(value, std::make_shared<const std::string>(text));
+        }
+
+        if (!next) {
+            return insert_status::old_string;
+        }
+
+        current_.store(std::move(next), std::memory_order_release);
+        return insert_status::new_string;
+    }
+
+    std::mutex writer_mutex_;
+    std::atomic<std::shared_ptr<const index>> current_;
 };
 
 /// Return the shared default database, owned by the library with static storage duration.

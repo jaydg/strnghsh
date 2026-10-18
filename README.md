@@ -83,6 +83,8 @@ but identifiers from different databases compare unequal even for identical text
 | Component | Concurrent access |
 | --- | --- |
 | `database` | Share freely for insertion and lookup. |
+| `read_mostly_database` | Writers serialize; live lookups and snapshot acquisition use an atomic shared pointer and avoid the writer mutex. |
+| `database_snapshot` | Share const lookups without locking; keep the snapshot alive and do not assign to or move from it while readers or views use it. |
 | `string_id` | Read, compare, and copy a published identifier concurrently. Synchronize assignment to an object that other threads access. |
 | Stored string views | Read without locking while the database lives; insertions and rehashes preserve them. |
 | `counter_generator` | Share `operator()()` and `discard()` with a thread-safe database. Completion order is unspecified; counters can be skipped by retries or discard. |
@@ -99,6 +101,113 @@ valid and unchanged for the duration of a call; use a separate status variable
 per call. Catch exceptions inside a `std::thread`/`std::jthread` worker, since an
 exception escaping it calls `std::terminate`. Futures provide another option:
 `std::async` transports worker exceptions to `future::get()`.
+
+### Look up names without locking
+
+For frequent hash-to-text lookup, capture an owning `database_snapshot` after
+registering names, then share it with rendering or region workers:
+
+```cpp
+import <iostream>;
+import <optional>;
+import strnghsh;
+
+int main()
+{
+    strnghsh::string_id tile("grass");
+    const auto names = strnghsh::default_database().snapshot();
+
+    // Repeated calls use only the snapshot; no database mutex is acquired.
+    if (const auto text = names.lookup(tile.hash_code())) {
+        std::cout << *text << '\n';
+    }
+}
+```
+
+Snapshot lookup performs const `std::unordered_map` operations without locking or
+allocation. It can run concurrently with other snapshot lookups and source database
+insertions. Unknown hashes return `std::nullopt`. Snapshots own their strings and
+can outlive the source database; returned views borrow the snapshot and must not
+be used after it is destroyed, assigned to, or moved from. Publish snapshots using
+normal C++ synchronization and keep each snapshot alive until its readers finish.
+
+Capturing a snapshot from `database` locks it while copying all entries and text.
+It costs additional memory and linear copying work; allocation failures propagate
+and leave the database unchanged. Capture at a loading or frame boundary, then
+reuse it. Later registrations appear only in a new snapshot. `database::lookup()`
+and `string_id::string()` backed by `database` continue to lock and see current
+registrations. Copying an existing snapshot shares ownership without copying entries
+or strings.
+
+If a tile already keeps its display text, call `id.string()` once and cache the
+returned view instead. That also avoids repeated lookups and locks, with no snapshot
+copy; the original database must remain alive while that view is used.
+
+### Publish batches for frequent readers
+
+Use `read_mostly_database` explicitly when registration is infrequent or batched.
+The default database remains the mutex-based `database`. Both implement
+`basic_database`, so identifiers, prefix composition, and generators work with either.
+
+```cpp
+import <array>;
+import <iostream>;
+import <optional>;
+import <span>;
+import <string_view>;
+import strnghsh;
+
+int main()
+{
+    using namespace std::string_view_literals;
+    strnghsh::read_mostly_database db;
+    const std::array tiles{"grass"sv, "water"sv, "stone"sv};
+    if (db.insert_batch(tiles) == strnghsh::insert_status::collision) {
+        return 1;
+    }
+
+    strnghsh::string_id grass("grass", db);
+    const auto frame_names = db.snapshot(); // Acquire once for this frame.
+    const std::array additions{"sand"sv, "snow"sv};
+    if (db.insert_batch(additions) == strnghsh::insert_status::collision) {
+        return 1;
+    }
+
+    // Live lookup sees the latest publication; frame_names keeps its old contents.
+    std::cout << *grass.string() << '\n';
+    std::cout << db.lookup(strnghsh::hash("sand")).value() << '\n';
+    return frame_names.lookup(strnghsh::hash("sand")) ? 1 : 0;
+}
+```
+
+`insert_batch(span<const string_view>)` computes hashes and copies new strings.
+A second overload accepts `span<const pair<hash_type, string_view>>` for supplied
+hashes, with the same responsibility for correct hashes as `insert()`. Inputs must
+remain valid and unchanged during the call; no input views are retained.
+
+Each batch clones the index at most once and publishes all additions together.
+Readers acquiring one snapshot see either the state before or after publication.
+Separate live lookup calls may see different publications. Existing strings are
+shared immutable objects, so returned views keep their addresses across updates.
+
+The batch result is `new_string` if any entry is new, `old_string` for an empty or
+duplicate-only batch, and `collision` for conflicting text under one hash, including
+conflicts within the batch. A collision rejects the entire batch. Allocation failures
+propagate and also publish nothing. Duplicate-only batches do not clone the index.
+Single-entry `insert()` uses the same publication mechanism.
+
+For N existing entries and K batch entries, publication takes expected O(N + K)
+index work plus copying new text. Register a loading batch together to amortize
+cloning. Old snapshots retain their indexes and share existing strings; the last
+owner releasing an old index pays its reclamation cost. There is no background
+reclamation thread.
+
+Live `lookup()` and `snapshot()` acquire `std::atomic<std::shared_ptr<...>>` without
+taking the writer mutex. Atomic shared pointers are **not guaranteed lock-free**;
+the tested libstdc++ implementation uses an internal lock. Acquiring one snapshot
+per frame or region avoids that synchronization for each name lookup. Acquisition
+does not copy entries or allocate, and the owning snapshot can outlive the database.
+Snapshot lookups themselves acquire no locks and do not allocate.
 
 ### Share a counter generator
 
@@ -215,6 +324,8 @@ Consumers can include the project and depend on its public module:
 
 ```lua
 set_languages("c++20")
+set_policy("build.c++.modules.std", false)
+set_policy("build.c++.modules.clang.fallbackscanner", true)
 includes("path/to/strnghsh")
 
 target("app")
@@ -228,7 +339,9 @@ Import standard library header units for facilities used by your own code
 (for example, `import <optional>;` when comparing optional views). xmake builds
 the required header units automatically. There are no third-party dependencies.
 Tests cover compile-time hash vectors, binary/bounded input, ownership, rehash
-stability, collisions, prefixes, disabled storage, generation, and concurrent access.
+stability, collisions, prefixes, disabled storage, generation, snapshot ownership
+and isolation, atomic batch publication and rollback, allocation failures, and
+concurrent access to both database implementations.
 
 The header-unit build is validated with Clang 22.1.8 using libstdc++ 16 and
 xmake 3.0.6 on Linux, in debug and release modes (including `NDEBUG`).
