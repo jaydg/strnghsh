@@ -1,22 +1,5 @@
 // Distributed under the zlib license; see LICENSE.
-import <array>;
-import <atomic>;
-import <cstddef>;
-import <cstdlib>;
-import <iostream>;
-import <limits>;
-import <new>;
-import <optional>;
-import <random>;
-import <span>;
-import <stdexcept>;
-import <string>;
-import <string_view>;
-import <thread>;
-import <type_traits>;
-import <unordered_set>;
-import <utility>;
-import <vector>;
+import std;
 
 import strnghsh;
 
@@ -584,7 +567,7 @@ int main()
         concurrent_access<sh::read_mostly_database>();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
-        return EXIT_FAILURE;
+        return 1;
     }
 
     std::cout << "All strnghsh tests passed\n";

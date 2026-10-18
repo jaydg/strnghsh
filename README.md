@@ -6,8 +6,7 @@ text available for logging. The database detects different strings with the same
 hash instead of silently accepting a collision.
 
 ```cpp
-import <iostream>;
-import <optional>;
+import std;
 import strnghsh;
 
 int main()
@@ -108,8 +107,7 @@ For frequent hash-to-text lookup, capture an owning `database_snapshot` after
 registering names, then share it with rendering or region workers:
 
 ```cpp
-import <iostream>;
-import <optional>;
+import std;
 import strnghsh;
 
 int main()
@@ -150,11 +148,7 @@ The default database remains the mutex-based `database`. Both implement
 `basic_database`, so identifiers, prefix composition, and generators work with either.
 
 ```cpp
-import <array>;
-import <iostream>;
-import <optional>;
-import <span>;
-import <string_view>;
+import std;
 import strnghsh;
 
 int main()
@@ -217,11 +211,7 @@ so outstanding async work finishes before either shared object is destroyed,
 including when a call to `get()` throws. The `main` handler reports exceptions.
 
 ```cpp
-import <exception>;
-import <future>;
-import <iostream>;
-import <optional>;
-import <vector>;
+import std;
 import strnghsh;
 
 int main() try
@@ -262,12 +252,7 @@ seeds. Different seeds do not guarantee different names: the shared database
 detects duplicates, and the generator retries or throws `generation_error`.
 
 ```cpp
-import <exception>;
-import <future>;
-import <iostream>;
-import <optional>;
-import <random>;
-import <vector>;
+import std;
 import strnghsh;
 
 int main() try
@@ -300,12 +285,10 @@ Its database's internal mutex does not protect the engine state.
 
 ## Build and test
 
-Requires xmake 3.0.6+ and a compiler with C++20 named module and standard
-library header-unit support. Standard library facilities use `import <header>;`
-throughout the module, tests, and examples; no C++23 `import std` is required.
-The build enables xmake's fallback dependency scanner for Clang so it can discover
-header-unit imports before compiling them. Clang currently emits experimental
-header-unit warnings.
+Requires xmake 3.0.6+ and a compiler and standard library with C++23 `import std`
+support, including installed standard library module sources and their module
+manifest. xmake builds the standard library module automatically and uses
+Clang's native dependency scanner.
 
 ```sh
 xmake f --toolchain=clang -m debug
@@ -323,9 +306,8 @@ compiler executables directly.
 Consumers can include the project and depend on its public module:
 
 ```lua
-set_languages("c++20")
-set_policy("build.c++.modules.std", false)
-set_policy("build.c++.modules.clang.fallbackscanner", true)
+set_languages("c++23")
+set_policy("build.c++.modules.std", true)
 includes("path/to/strnghsh")
 
 target("app")
@@ -335,15 +317,14 @@ target("app")
 ```
 
 Then use `import strnghsh;` in C++.
-Import standard library header units for facilities used by your own code
-(for example, `import <optional>;` when comparing optional views). xmake builds
-the required header units automatically. There are no third-party dependencies.
+Use `import std;` for standard library facilities used by your own code
+(for example, when comparing optional views). There are no third-party dependencies.
 Tests cover compile-time hash vectors, binary/bounded input, ownership, rehash
 stability, collisions, prefixes, disabled storage, generation, snapshot ownership
 and isolation, atomic batch publication and rollback, allocation failures, and
 concurrent access to both database implementations.
 
-The header-unit build is validated with Clang 22.1.8 using libstdc++ 16 and
+The `import std` build is validated with Clang 22.1.8 using libstdc++ 16 and
 xmake 3.0.6 on Linux, in debug and release modes (including `NDEBUG`).
 
 Generate API documentation with `doxygen Doxyfile` (output: `docs/html/index.html`).

@@ -1,11 +1,9 @@
 set_xmakever("3.0.6")
 set_project("strnghsh")
 set_version("0.1.0")
-set_languages("c++20")
+set_languages("c++23")
 add_rules("mode.debug", "mode.release")
-set_policy("build.c++.modules.std", false)
--- clang-scan-deps cannot discover header units before they have been built.
-set_policy("build.c++.modules.clang.fallbackscanner", true)
+set_policy("build.c++.modules.std", true)
 
 target("strnghsh")
     set_kind("static")

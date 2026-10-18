@@ -1,22 +1,9 @@
 // Altered C++20 reimplementation of foonathan/string_id.
 // Copyright (C) 2014-2015 Jonathan Müller <jonathanmueller.dev@gmail.com>
 // Distributed under the zlib license; see LICENSE.
-export module strnghsh;
 
-import <atomic>;
-import <cstddef>;
-import <cstdint>;
-import <functional>;
-import <memory>;
-import <mutex>;
-import <optional>;
-import <random>;
-import <span>;
-import <stdexcept>;
-import <string>;
-import <string_view>;
-import <unordered_map>;
-import <utility>;
+export module strnghsh;
+import std;
 
 /// Lightweight string identifiers with optional text storage.
 export namespace strnghsh
