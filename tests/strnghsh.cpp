@@ -1,18 +1,18 @@
 // Distributed under the zlib license; see LICENSE.
-#include <array>
-#include <atomic>
-#include <cstdlib>
-#include <iostream>
-#include <limits>
-#include <optional>
-#include <random>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <unordered_set>
-#include <vector>
+import <array>;
+import <atomic>;
+import <cstdlib>;
+import <iostream>;
+import <limits>;
+import <optional>;
+import <random>;
+import <stdexcept>;
+import <string>;
+import <string_view>;
+import <thread>;
+import <type_traits>;
+import <unordered_set>;
+import <vector>;
 
 import strnghsh;
 

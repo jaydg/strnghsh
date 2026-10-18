@@ -6,7 +6,8 @@ text available for logging. The database detects different strings with the same
 hash instead of silently accepting a collision.
 
 ```cpp
-#include <iostream>
+import <iostream>;
+import <optional>;
 import strnghsh;
 
 int main()
@@ -55,11 +56,133 @@ and collisions up to eight attempts, then throw `generation_error`. Counter
 generators support concurrent calls with a thread-safe database; random generators
 require external synchronization. `discard(n)` advances counter/engine state.
 
+## Concurrent use
+
+Share one `database` when identifiers created by different threads should compare
+equal. Every insertion and lookup takes the same database mutex; duplicate and
+collision checks happen inside that lock. Prefix composition is safe too: it
+reads immutable prefix text, then inserts the concatenation. Comparisons and
+`hash_code()` do not access the database or acquire locks. Heavy concurrent lookup
+or insertion can contend on the mutex; independent databases avoid that contention,
+but identifiers from different databases compare unequal even for identical text.
+
+| Component | Concurrent access |
+| --- | --- |
+| `database` | Share freely for insertion and lookup. |
+| `string_id` | Read, compare, and copy a published identifier concurrently. Synchronize assignment to an object that other threads access. |
+| Stored string views | Read without locking while the database lives; insertions and rehashes preserve them. |
+| `counter_generator` | Share `operator()()` and `discard()` with a thread-safe database. Completion order is unspecified; counters can be skipped by retries or discard. |
+| `random_generator` | Use a separate instance per thread, or protect every call to `operator()()` and `discard()` with the same external mutex. |
+| `dummy_database` | Stateless and safe to share; uniqueness and collisions are not checked. |
+| Custom `basic_database` | Supply synchronization in the implementation or around all accesses, including identifier construction and `string()`. |
+
+Construct shared objects before starting workers and keep the database alive until
+all workers, identifiers, and string views are finished. Publish identifiers using
+normal C++ synchronization, such as thread creation, futures, or a protected queue.
+The database mutex does not protect your identifier variables, input strings,
+output containers, or shared `insert_status` arguments. Input text must remain
+valid and unchanged for the duration of a call; use a separate status variable
+per call. Catch exceptions inside a `std::thread`/`std::jthread` worker, since an
+exception escaping it calls `std::terminate`. Futures provide another option:
+`std::async` transports worker exceptions to `future::get()`.
+
+### Share a counter generator
+
+This complete example creates identifiers in four workers and prints their text
+in the calling thread. The futures are declared after the generator and database,
+so outstanding async work finishes before either shared object is destroyed,
+including when a call to `get()` throws. The `main` handler reports exceptions.
+
+```cpp
+import <exception>;
+import <future>;
+import <iostream>;
+import <optional>;
+import <vector>;
+import strnghsh;
+
+int main() try
+{
+    strnghsh::database db;
+    strnghsh::string_id prefix("entity-", db);
+    strnghsh::counter_generator generator(prefix);
+    std::vector<std::future<strnghsh::string_id>> jobs;
+
+    for (int worker = 0; worker < 4; ++worker) {
+        jobs.push_back(std::async(std::launch::async, [&generator] {
+            return generator();
+        }));
+    }
+
+    for (auto& job : jobs) {
+        const auto id = job.get();
+        std::cout << id.string().value() << '\n';
+    }
+} catch (const std::exception& error) {
+    std::cerr << error.what() << '\n';
+    return 1;
+}
+```
+
+With this initially empty database and unpadded counter, the four names are
+`entity-0` through `entity-3`; their printed order depends on scheduling. Generation
+retries existing names or hash collisions up to eight attempts, then throws
+`generation_error`. Counter operations are atomic but do not synchronize unrelated
+application data. Concurrent `discard()` calls can skip values, and a fixed width
+or counter wrap can make suffixes repeat.
+
+### Give each worker its own random generator
+
+Keep the database shared for uniqueness checking, but construct the engine and
+generator inside each worker. This complete example uses different, reproducible
+seeds. Different seeds do not guarantee different names: the shared database
+detects duplicates, and the generator retries or throws `generation_error`.
+
+```cpp
+import <exception>;
+import <future>;
+import <iostream>;
+import <optional>;
+import <random>;
+import <vector>;
+import strnghsh;
+
+int main() try
+{
+    strnghsh::database db;
+    strnghsh::string_id prefix("task-", db);
+    std::vector<std::future<strnghsh::string_id>> jobs;
+
+    for (unsigned worker = 0; worker < 4; ++worker) {
+        jobs.push_back(std::async(std::launch::async, [prefix, worker] {
+            strnghsh::random_generator<std::mt19937, 12> generator(
+                prefix, std::mt19937{worker});
+            return generator();
+        }));
+    }
+
+    for (auto& job : jobs) {
+        const auto id = job.get();
+        std::cout << id.string().value() << '\n';
+    }
+} catch (const std::exception& error) {
+    std::cerr << error.what() << '\n';
+    return 1;
+}
+```
+
+To share a random generator instead, lock an external `std::mutex` with
+`std::lock_guard` for the entire `generator()` or `generator.discard(n)` call.
+Its database's internal mutex does not protect the engine state.
+
 ## Build and test
 
-Requires xmake 3.0.6+ and a compiler with C++20 module support. Tested toolchains
-are recorded below. Standard library headers are included
-in the module's global fragment; no C++23 `import std` is required.
+Requires xmake 3.0.6+ and a compiler with C++20 named module and standard
+library header-unit support. Standard library facilities use `import <header>;`
+throughout the module, tests, and examples; no C++23 `import std` is required.
+The build enables xmake's fallback dependency scanner for Clang so it can discover
+header-unit imports before compiling them. Clang currently emits experimental
+header-unit warnings.
 
 ```sh
 xmake f --toolchain=clang -m debug
@@ -67,7 +190,7 @@ xmake
 xmake test
 ```
 
-Use `xmake f -m release` to select release mode, or
+Use `xmake f --toolchain=clang -m release` to select release mode, or
 `xmake f -c --toolchain=gcc -m release` to build with GCC. `xmake test` automatically
 builds the test executable; the default build produces only the library.
 If Clang's scanner cannot find standard headers when a compiler wrapper is on
@@ -87,14 +210,14 @@ target("app")
 ```
 
 Then use `import strnghsh;` in C++.
-Include standard headers for standard library facilities used by your own code
-(for example, `<optional>` when comparing optional views). There are no third-party dependencies.
+Import standard library header units for facilities used by your own code
+(for example, `import <optional>;` when comparing optional views). xmake builds
+the required header units automatically. There are no third-party dependencies.
 Tests cover compile-time hash vectors, binary/bounded input, ownership, rehash
 stability, collisions, prefixes, disabled storage, generation, and concurrent access.
 
-Validated with Clang 22.1.8 and GCC 16.2.1 using libstdc++ 16 and xmake 3.0.6
-on Linux. GCC was tested in release mode with `NDEBUG`; Clang was also tested
-with AddressSanitizer and UndefinedBehaviorSanitizer.
+The header-unit build is validated with Clang 22.1.8 using libstdc++ 16 and
+xmake 3.0.6 on Linux, in debug and release modes (including `NDEBUG`).
 
 Generate API documentation with `doxygen Doxyfile` (output: `docs/html/index.html`).
 Before every commit, format with the tracked configuration and rerun the checks:

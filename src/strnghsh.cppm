@@ -1,22 +1,20 @@
 // Altered C++20 reimplementation of foonathan/string_id.
 // Copyright (C) 2014-2015 Jonathan Müller <jonathanmueller.dev@gmail.com>
 // Distributed under the zlib license; see LICENSE.
-module;
-
-#include <atomic>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <mutex>
-#include <optional>
-#include <random>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include <utility>
-
 export module strnghsh;
+
+import <atomic>;
+import <cstddef>;
+import <cstdint>;
+import <functional>;
+import <mutex>;
+import <optional>;
+import <random>;
+import <stdexcept>;
+import <string>;
+import <string_view>;
+import <unordered_map>;
+import <utility>;
 
 /// Lightweight string identifiers with optional text storage.
 export namespace strnghsh
@@ -56,6 +54,9 @@ enum class insert_status {
 
 /// Stable-address database interface. Must outlive its identifiers and returned views.
 /// Implementations must own inserted text, never erase/change it, and preserve views.
+/// @par Thread safety
+/// Custom implementations define their own synchronization. If not internally synchronized,
+/// callers must serialize all access, including through string_id and generators.
 class basic_database
 {
 public:
@@ -89,6 +90,11 @@ public:
 
 /// Thread-safe storage using std::unordered_map; views survive insertions and rehashes.
 /// Destruction requires that no threads are accessing the database or its views.
+/// @par Thread safety
+/// One mutex serializes insertions, duplicate/collision checks, and lookups. Returned text
+/// is immutable and can be read without locking while this database lives. Prefix insertion
+/// is safe because prefix text never changes, although lookup and insertion lock separately.
+/// This mutex does not protect caller-owned input, output variables, or application data.
 class database final : public basic_database
 {
 public:
@@ -152,6 +158,11 @@ public:
 
 /// A hash plus a non-owning database pointer. Copying does not access the database.
 /// The database must outlive this object; equality includes database identity.
+/// @par Thread safety
+/// After synchronized publication, concurrent reads, comparisons, and copies are safe.
+/// Synchronize assignment to an object being accessed by other threads. Construction and
+/// string() require a thread-safe database or external synchronization. Input text must
+/// stay valid and unchanged during construction; use a separate insert_status per call.
 class string_id
 {
 public:
@@ -196,6 +207,8 @@ public:
     }
 
     /// Retrieve stored text, or nullopt when storage is disabled.
+    /// With strnghsh::database the returned view can be read concurrently, without locking,
+    /// until the database is destroyed; this call itself acquires the database mutex.
     [[nodiscard]] std::optional<std::string_view> string() const
     {
         return db_->lookup(id_);
@@ -256,6 +269,11 @@ export namespace strnghsh
 /// Thread-safe numeric suffix generator; database access must also be thread-safe.
 /// Duplicates/collisions retry at most eight times before throwing generation_error.
 /// With dummy_database, uniqueness cannot be checked. Counter arithmetic wraps modulo 2^64.
+/// @par Thread safety
+/// Concurrent operator()() and discard() calls are safe after synchronized publication.
+/// The generator and its database must outlive all calls. Atomic counter allocation does
+/// not order completion or synchronize unrelated data. Retries and discard() can skip
+/// values; fixed-width truncation and wrap can repeat suffixes.
 class counter_generator
 {
 public:
@@ -296,6 +314,11 @@ private:
 /// Random suffix generator using a standard uniform random bit generator.
 /// Not thread-safe. Tries eight times before throwing generation_error.
 /// With dummy_database, uniqueness cannot be checked.
+/// @par Thread safety
+/// Use one generator per thread with a shared synchronized database, or guard every
+/// operator()() and discard() call on a shared generator with the same external mutex.
+/// The database mutex does not protect the engine. Distinct seeds do not guarantee
+/// distinct names; database insertion checks uniqueness across workers.
 template<class Engine, std::size_t Length>
 class random_generator
 {
