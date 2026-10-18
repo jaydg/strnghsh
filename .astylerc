@@ -1,0 +1,38 @@
+# RogueLikeLib code style definition file for Astyle
+
+# Don't create backup files, let git handle it
+suffix=none
+
+# One True Brace style
+style=1tbs
+
+# Add braces to unbraced one line conditional statements
+add-braces
+
+# 4 spaces, convert tabs to spaces and get rid of superfluous whitespace
+indent=spaces=4
+convert-tabs
+squeeze-ws
+
+# Indent comments inside blocks
+indent-col1-comments
+
+# Remove padding around parentheses and square brackets
+unpad-paren
+unpad-brackets
+unpad-paren
+
+# Insert a space after ',', if, while, for, and around operators
+pad-comma
+pad-header
+pad-oper
+
+# Pad empty lines e.g. around  'if', 'for', 'while'
+break-blocks
+
+# Extend line length to 100 characters
+max-continuation-indent=100
+
+# Pointer/reference operators go next to the type (on the left)
+align-pointer=type
+align-reference=type
