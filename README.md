@@ -13,8 +13,7 @@ import strnghsh;
 int main()
 {
     using namespace strnghsh::literals;
-    strnghsh::database db;
-    strnghsh::string_id player("player", db);
+    strnghsh::string_id player("player");
     strnghsh::string_id weapon(player, "/weapon");
 
     if (player == "player"_id) {
@@ -31,6 +30,21 @@ immutable copy of each string; views remain valid across insertions and rehashes
 Identifiers compare equal only when their hashes **and databases** match. Comparing
 an identifier with a raw hash checks only the hash. `std::hash<string_id>` supports
 standard unordered containers.
+
+`string_id("player")` uses `default_database()`, a shared, lazily initialized,
+thread-safe name table. Prefixes and generators keep using their prefix's database.
+The library owns this table and retains all its strings until program shutdown;
+do not access its identifiers or views after the table is destroyed during shutdown.
+For scoped storage, continue to pass a database explicitly: `string_id("player", db)`.
+For status-returning construction, pass `default_database()` explicitly as well.
+
+This convenience keeps the same representation and equality rules: `string_id`
+typically occupies 16 bytes on 64-bit platforms (the size is not guaranteed).
+For dense per-entity data, store `hash_type` from `id.hash_code()` after registering
+the text in the shared table. Recover text with `default_database().lookup(value)`.
+A bare hash occupies 64 bits and carries no database identity; use it only where
+the intended table is known. Creating hashes directly with `hash()` or `"text"_id`
+does not register text or check collisions.
 
 `hash(string_view)` is constexpr; `"text"_id` is consteval. Both process all bytes,
 including embedded NULs, treating bytes as unsigned. ASCII hashes match upstream.

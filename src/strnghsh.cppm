@@ -125,6 +125,16 @@ private:
     std::unordered_map<hash_type, std::string> strings_;
 };
 
+/// Return the shared default database, owned by the library with static storage duration.
+/// Initialization and concurrent insertion/lookup are thread-safe. Initialization failures
+/// propagate and a later call retries. Entries remain until destruction at program shutdown;
+/// identifiers and returned views must not be used after the database is destroyed.
+[[nodiscard]] database& default_database()
+{
+    static database instance;
+    return instance;
+}
+
 /// Stateless, thread-safe storage opt-out; no text recovery or uniqueness/collision checks.
 class dummy_database final : public basic_database
 {
@@ -166,6 +176,10 @@ public:
 class string_id
 {
 public:
+    /// Hash and store text in default_database(); prefix composition retains that database.
+    /// Throw collision_error on a collision; initialization/allocation exceptions propagate.
+    explicit string_id(std::string_view text) : string_id(text, default_database()) {}
+
     /// Hash and store text; throw collision_error on a collision.
     string_id(std::string_view text, basic_database& db) : id_(hash(text)), db_(&db)
     {

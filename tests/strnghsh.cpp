@@ -29,6 +29,7 @@ static_assert("a\0b"_id != "a"_id);
 static_assert(sh::hash("\xff"sv) == 0xaf64724c8602eb6eULL);
 static_assert(std::is_trivially_copyable_v<sh::string_id>);
 static_assert(!std::is_move_constructible_v<sh::database>);
+static_assert(!std::is_convertible_v<std::string_view, sh::string_id>);
 
 namespace
 {
@@ -49,6 +50,50 @@ void throws(Function&& function)
     }
 
     throw std::runtime_error("expected exception was not thrown");
+}
+
+void default_database_access()
+{
+    // Run first so workers exercise concurrent first use of the shared table.
+    std::array<std::optional<sh::string_id>, 4> ids;
+    std::atomic<bool> success{true};
+    {
+        std::vector<std::jthread> threads;
+
+        for (auto& id : ids) {
+            threads.emplace_back([&id, &success] {
+                try
+                {
+                    id.emplace("default-shared");
+                } catch (...)
+                {
+                    success = false;
+                }
+            });
+        }
+    }
+    require(success, "concurrent default database construction");
+
+    for (const auto& id : ids) {
+        require(id.has_value() && *id == *ids.front(), "default database identity across workers");
+        require(&id->database() == &sh::default_database(), "default database accessor");
+    }
+
+    sh::string_id shared("default-shared", sh::default_database());
+    require(shared == *ids.front(), "explicit and implicit default database match");
+    sh::database local;
+    require(shared != sh::string_id("default-shared", local), "default and local databases differ");
+    sh::string_id composed(shared, "/child");
+    require(composed == sh::string_id("default-shared/child"), "default prefix database");
+    sh::counter_generator generator(composed);
+    const auto generated = generator();
+    require(generated == sh::string_id("default-shared/child0"), "default generator database");
+    const sh::hash_type compact = generated.hash_code();
+    require(sh::default_database().lookup(compact) == "default-shared/child0"sv,
+            "recover default text from bare hash");
+
+    sh::default_database().insert("default-collision"_id, "conflicting text");
+    throws<sh::collision_error>([] { sh::string_id id("default-collision"); });
 }
 
 void identifiers()
@@ -231,6 +276,7 @@ void concurrent_access()
 int main()
 {
     try {
+        default_database_access();
         identifiers();
         collisions();
         disabled_storage();
