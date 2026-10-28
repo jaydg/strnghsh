@@ -82,7 +82,7 @@ but identifiers from different databases compare unequal even for identical text
 | Component | Concurrent access |
 | --- | --- |
 | `database` | Share freely for insertion and lookup. |
-| `read_mostly_database` | Writers serialize; live lookups and snapshot acquisition use an atomic shared pointer and avoid the writer mutex. |
+| `read_mostly_database` | Writers serialize; live lookups and snapshot acquisition copy the published shared pointer under a short lock and avoid the writer mutex. |
 | `database_snapshot` | Share const lookups without locking; keep the snapshot alive and do not assign to or move from it while readers or views use it. |
 | `string_id` | Read, compare, and copy a published identifier concurrently. Synchronize assignment to an object that other threads access. |
 | Stored string views | Read without locking while the database lives; insertions and rehashes preserve them. |
@@ -196,9 +196,11 @@ cloning. Old snapshots retain their indexes and share existing strings; the last
 owner releasing an old index pays its reclamation cost. There is no background
 reclamation thread.
 
-Live `lookup()` and `snapshot()` acquire `std::atomic<std::shared_ptr<...>>` without
-taking the writer mutex. Atomic shared pointers are **not guaranteed lock-free**;
-the tested libstdc++ implementation uses an internal lock. Acquiring one snapshot
+Live `lookup()` and `snapshot()` copy the published `std::shared_ptr` under a mutex
+held only for that copy and for publication, without taking the writer mutex: they are
+**not lock-free**. (`std::atomic<std::shared_ptr<...>>` would not be either - libstdc++
+locks internally - and libc++ does not provide it, so the library builds with both
+standard libraries.) Acquiring one snapshot
 per frame or region avoids that synchronization for each name lookup. Acquisition
 does not copy entries or allocate, and the owning snapshot can outlive the database.
 Snapshot lookups themselves acquire no locks and do not allocate.

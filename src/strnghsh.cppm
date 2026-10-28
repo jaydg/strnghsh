@@ -179,9 +179,11 @@ private:
 /// Text views remain valid while this database lives, across all subsequent publications.
 /// Destruction requires that no calls are in flight; captured snapshots may outlive it.
 /// @par Thread safety
-/// Writers serialize with one mutex. lookup() and snapshot() acquire an atomic shared_ptr,
-/// never the writer mutex. Atomic shared_ptr operations may internally lock; this is not
-/// a lock-free guarantee. Retained snapshots perform lookup without synchronization.
+/// Writers serialize with one mutex. lookup() and snapshot() copy the published shared_ptr
+/// under a second mutex, held only for that copy and for publication, never the writer
+/// mutex; this is not lock-free. (A std::atomic<std::shared_ptr> is not provided by every
+/// standard library, and libstdc++'s locks internally as well.) Retained snapshots perform
+/// lookup without synchronization.
 /// Publishing new entries costs O(N + K) expected index work for N existing and K batch
 /// entries, plus copying new text. Releasing the last owner of an old index reclaims it.
 class read_mostly_database final : public basic_database
@@ -229,12 +231,12 @@ public:
     }
 
     /// Acquire the current owning snapshot without copying entries or text.
-    /// Atomic acquisition may internally lock; subsequent snapshot lookups do not.
+    /// Acquisition briefly locks the published pointer; subsequent snapshot lookups do not.
     /// Snapshot acquisition does not allocate. Later batches are visible only to later
     /// acquisitions. A captured snapshot and its text can outlive this database.
     [[nodiscard]] database_snapshot snapshot() const
     {
-        return database_snapshot(current_.load(std::memory_order_acquire));
+        return database_snapshot(current());
     }
 
 private:
@@ -244,7 +246,7 @@ private:
     insert_status insert_batch_impl(const Entries& entries, GetEntry get_entry)
     {
         const std::lock_guard lock(writer_mutex_);
-        const auto previous = current_.load(std::memory_order_relaxed);
+        const auto previous = current();
         std::shared_ptr<index> next;
 
         for (const auto& input : entries) {
@@ -271,12 +273,24 @@ private:
             return insert_status::old_string;
         }
 
-        current_.store(std::move(next), std::memory_order_release);
+        {
+            const std::lock_guard publishing(current_mutex_);
+            current_ = std::move(next);
+        }
+
         return insert_status::new_string;
     }
 
+    /// The published index, copied under its mutex.
+    [[nodiscard]] std::shared_ptr<const index> current() const
+    {
+        const std::lock_guard lock(current_mutex_);
+        return current_;
+    }
+
     std::mutex writer_mutex_;
-    std::atomic<std::shared_ptr<const index>> current_;
+    mutable std::mutex current_mutex_;
+    std::shared_ptr<const index> current_;
 };
 
 /// Return the shared default database, owned by the library with static storage duration.
